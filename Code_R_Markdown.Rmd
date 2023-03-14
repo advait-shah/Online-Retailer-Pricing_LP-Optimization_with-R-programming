@@ -1,0 +1,428 @@
+---
+title: "A7_Code"
+author: "Advait Shah"
+date: "04/03/2023"
+output:
+  word_document: default
+  html_document: default
+---
+
+
+Read the data
+```{r}
+
+mydata = read.csv("Data_P1.csv")
+colnames(mydata)
+nrow(mydata)
+dim(mydata)
+
+```
+
+Calculate the total inventory used (share of sale)
+```{r}
+
+Total = rowSums(mydata[,3:26])
+head(Total)
+
+```
+
+Adding "Total" to main table
+```{r}
+
+mydata = cbind(mydata, Total)
+head(mydata)
+
+```
+
+Filter to find stockouts and nonstockouts
+```{r}
+
+stockouts = mydata[(mydata$Total>=1.00 & mydata$hour.24==0),]
+nonstockouts = mydata[!(mydata$Total>=1.00 & mydata$hour.24==0),]
+
+```
+
+
+Calculate the cumulative stockouts (to help us find the stockout hour)
+```{r}
+
+stockouts_cumulative = stockouts
+for (i in 4:26) {
+  stockouts_cumulative[,i] = stockouts_cumulative[,i] + stockouts_cumulative[,i-1]
+}
+head(stockouts_cumulative)
+
+```
+
+Finding the index of 1 (100%) in  the stockouts cumulative table
+```{r}
+
+stockouts_time = vector(mode="numeric")
+for (i in 1:nrow(stockouts_cumulative)) {
+  stockouts_time[i] = match(max(stockouts_cumulative[i,3:26]),stockouts_cumulative[i,3:26])
+}
+stockouts_time
+
+```
+
+Adding Stockout time to stockouts table
+```{r}
+stockouts = cbind(stockouts, stockouts_time)
+head(stockouts)
+```
+
+
+Clustering - K-means
+```{r}
+
+totwithinss = list()
+betweenss = list()
+for (k in 2:5){
+  clusters = kmeans(nonstockouts[,3:26], k, nstart = 1,iter.max=50)
+  totwithinss[k] = clusters$tot.withinss
+  
+  betweenss[k] = clusters$betweenss
+
+}
+
+plot(c(2:5),totwithinss[2:5], type = "b", xlab= "no. of clusters", ylab= "total within sum of squares")
+plot(c(2:5),betweenss[2:5], type = "b", xlab= "no. of clusters", ylab= "total between sum of squares")
+
+#[1] "cluster"      "centers"      "totss"        "withinss"     "tot.withinss"
+#[6] "betweenss"    "size"         "iter"         "ifault"
+
+```
+
+
+Clustering - Elbow Method
+```{r}
+# Install "factoextra" and "NbClust"
+#install.packages("factoextra")
+#install.packages("NbClust")
+library(ggplot2)
+library(factoextra)
+library(NbClust)
+
+fviz_nbclust(nonstockouts[,3:26], kmeans, method = "wss",iter.max=50) + 
+  geom_vline(xintercept = 3, linetype =2) + 
+  labs(title = "Elbow method")
+
+```
+As per this graph and our previous analysis in part-1, we will select number of clusters as 3 for our further tasks.
+
+create clusters visualization
+```{r}
+clusters3 = kmeans(nonstockouts[,3:26], 3, nstart = 1,iter.max=50)
+
+
+fviz_cluster(clusters3,data=nonstockouts[,3:26], 
+             palette= c("#2E9FDF","#FF0000","#00FF00"), 
+             geom = "point",
+             ellipse.type = "convex", 
+             xlab= "hrly_sales_percent_pca_dim1", 
+             ylab= "hrly_sales_percent_pca_dim2", 
+             main= "Item Demand Clusters")+ 
+  theme_minimal()
+
+```
+
+
+
+Find Lost Sales and Calculate True demand
+```{r}
+
+true_demand = vector(mode = "numeric")
+
+clusters = kmeans(nonstockouts[,3:26], 3, nstart = 1,iter.max=50)
+centroids = clusters$centers
+
+determined_cluster = vector()
+lost_percentage = vector()
+
+
+for (i in 1:nrow(stockouts)) {
+  p = stockouts[i, 3:(stockouts[i,28]+2)]
+  rownames(p) = "p"
+  k_1 = centroids[1,1:stockouts[i,28]]
+  k_2 = centroids[2,1:stockouts[i,28]]
+  k_3 = centroids[3,1:stockouts[i,28]]
+  mat = rbind(k_1, k_2, k_3, p)
+  dis_mat = as.matrix(dist(mat, method = "euclidean"))
+  determined_cluster[i] = match(min(dis_mat[4,1:3]), dis_mat[4,1:3])
+  lost_percentage[i] = sum(centroids[determined_cluster[i], (stockouts[i,28] + 1):24])
+  true_demand[i] = stockouts[i,2]/(1-lost_percentage[i])
+}
+
+stockouts=cbind(stockouts,true_demand)
+colnames(stockouts)
+```
+
+
+```{r}
+
+true_demand = nonstockouts$Total.sales
+nonstockouts = cbind(nonstockouts, true_demand)
+colnames(nonstockouts)
+
+```
+
+```{r}
+Demands = rbind(stockouts[,c(1,29)], nonstockouts[,c(1,28)])
+head(Demands)
+```
+
+
+Import new Data and Merge Data sets
+```{r}
+mydata2 = read.csv("Data_P2.csv")
+head(mydata2)
+
+prediction_data = merge(Demands, mydata2, by = "Item.")
+head(prediction_data)
+```
+
+Preparing Data
+```{r}
+prediction_data = prediction_data[, 2:17]
+head(prediction_data)
+#pkgs = c("resample", "dplyr", "ipred", "caret", "rpart", "rpart.plot")
+#install.packages(pkgs)
+library(rpart)  # Performing Regression Trees
+library(rpart.plot)  # Plotting Regression Trees
+```
+
+```{r}
+cor(prediction_data)
+```
+
+No significant correlation observed and hence we can include all variables in our LR model preparation.
+
+
+Comparing results of the regression tree and linear regression methods:
+```{r}
+
+# train and test data set split in 80-20 ratio
+prediction_data_train = prediction_data[1:(0.8*nrow(prediction_data)),]
+prediction_data_test = prediction_data[(0.8*nrow(prediction_data)+1):nrow(prediction_data),]
+
+head(prediction_data_train)
+head(prediction_data_test)
+```
+
+Linear Regression model:
+```{r}
+#install.packages("Metrics")
+library(Metrics)
+
+l_regression_model_1 = lm(true_demand~., data = prediction_data_train)
+
+mae(prediction_data_test$true_demand,predict.lm(l_regression_model_1,prediction_data_test))
+
+```
+Regression Tree model:
+```{r}
+regression_tree_1 = rpart(formula = true_demand~., data = prediction_data_train, method = "anova")
+
+mae(prediction_data_test$true_demand,predict(regression_tree_1,prediction_data_test))
+
+```
+So, we see that, we get MAE of 991.24 in Linear regression model; whereas, it is about 873.62 in regression tree when model is tested on test data set (which is remaining 20% of the given data set)
+
+##########################################
+
+Now, we will use entire data set to train both of these models (which will be used later to predict demands based on new data and their set prices):
+
+```{r}
+
+regression_tree = rpart(formula = true_demand~., data = prediction_data, method = "anova")
+#rpart.plot(regression_tree)
+
+l_regression_model = lm(true_demand~., data = prediction_data)
+#summary(l_regression_model)
+
+```
+
+Importing new data
+```{r}
+Data_test = read.csv("new_data.csv")
+Data_test
+```
+
+
+Optimization:
+
+
+Price Definition
+```{r}
+Prices = c(25, 30, 35)
+P = rep(Prices, nrow(Data_test))
+P
+```
+
+
+Preparing Variables
+```{r}
+Data_test2 = Data_test[rep(seq_len(nrow(Data_test)), each=3), ]
+Data_test2
+```
+
+
+Possible Ks
+```{r}
+possible_k = seq(length(Prices)*min(Prices), length(Prices)*max(Prices), by = 5)
+possible_k
+```
+
+
+Initialization
+```{r}
+Demand_pred = vector(mode = "numeric")
+Objectives = vector(mode = "numeric")
+Solutions = matrix(nrow = length(possible_k), ncol = length(Prices)*nrow(Data_test))
+```
+
+Objective: Revenue Optimization:
+
+Optimal Prices when Demands were predicted with "Regression Tree" model for each price and set of data:
+```{r}
+#install.packages("lpSolve", dependencies = TRUE)
+library(lpSolve)
+for (n in 1:length(possible_k)) {
+  for (i in 1:length(P)) {
+    Data_test2$Price = P[i]
+    Data_test2$Relative_Price_of_Competing_Styles = P[i]/(possible_k[n]/3)
+    Demand_pred[i] = predict(regression_tree, Data_test2[i, ])
+  }
+  Obj_coeff = Demand_pred*P
+  Cons_coeff = matrix(c(1,1,1,0,0,0,0,0,0,
+                        0,0,0,1,1,1,0,0,0,
+                        0,0,0,0,0,0,1,1,1,
+                        P[1], P[2],P[3],P[4],P[5],P[6],P[7],P[8],P[9]), nrow = 4, byrow = TRUE)
+  Dir = c("==",
+          "==",
+          "==",
+          "==")
+  Rhs = c(1,
+          1,
+          1,
+          possible_k[n])
+  Model = lp("max", Obj_coeff, Cons_coeff, Dir, Rhs, all.bin = TRUE)
+  Objectives[n] = Model$objval
+  Solutions[n,] = Model$solution
+}
+Demand_pred
+Solutions
+Objectives
+Solutions[match(max(Objectives), Objectives), ]
+
+```
+so, we get here optimal value of objective as 514557.0 and corresponding optimal prices for products A, B and C are 30,30, and 30 units.  
+
+---------------------------
+
+Optimal Prices when Demands were predicted with "Linear Regression" model for each price and set of data:
+```{r}
+
+for (n in 1:length(possible_k)) {
+  for (i in 1:length(P)) {
+    Data_test2$Price = P[i]
+    Data_test2$Relative_Price_of_Competing_Styles = P[i]/(possible_k[n]/3)
+    Demand_pred[i] = predict(l_regression_model, Data_test2[i, ])
+  }
+  Obj_coeff = Demand_pred*P
+  Cons_coeff = matrix(c(1,1,1,0,0,0,0,0,0,
+                        0,0,0,1,1,1,0,0,0,
+                        0,0,0,0,0,0,1,1,1,
+                        P[1], P[2],P[3],P[4],P[5],P[6],P[7],P[8],P[9]), nrow = 4, byrow = TRUE)
+  Dir = c("==",
+          "==",
+          "==",
+          "==")
+  Rhs = c(1,
+          1,
+          1,
+          possible_k[n])
+  Model = lp("max", Obj_coeff, Cons_coeff, Dir, Rhs, all.bin = TRUE)
+  Objectives[n] = Model$objval
+  Solutions[n,] = Model$solution
+}
+Demand_pred
+Solutions
+Objectives
+Solutions[match(max(Objectives), Objectives), ]
+
+```
+so, we get here optimal value of objective as 504691.9 and corresponding optimal prices for the products A, B and C are 30,30, and 30 units.
+So, when we used Linear regression model instead of regression trees for demand prediction and subsequent optimization problem, our optimal prices of products remained unchanged.
+
+###################################
+
+Now, adding some price related constraints:
+Items C and B cannot be sold at $35.
+Item A cannot be sold at $25.
+
+Price Definition
+```{r}
+Prices = c(25, 30, 35)
+# possible prices of A, B and C after applying constraints (each product has two possible prices)
+P = c(30, 35, 25, 30, 25, 30)
+P
+```
+
+
+Preparing Variables
+```{r}
+Data_test2 = Data_test[rep(seq_len(nrow(Data_test)), each=2), ]
+Data_test2
+```
+
+
+Possible Ks
+```{r}
+possible_k = seq(length(Prices)*min(Prices), length(Prices)*max(Prices), by = 5)[1:5] 
+#sliced because 100 and 105 not possible due to contraints
+possible_k
+```
+
+Initialization
+```{r}
+Demand_pred = vector(mode = "numeric")
+Objectives = vector(mode = "numeric")
+Solutions = matrix(nrow = length(possible_k), ncol = 2*nrow(Data_test))
+```
+
+Running LP optimization:
+```{r}
+for (n in 1:length(possible_k)) {
+  for (i in 1:length(P)) {
+    Data_test2$Price = P[i]
+    Data_test2$Relative_Price_of_Competing_Styles = P[i]/(possible_k[n]/3)
+    Demand_pred[i] = predict(regression_tree, Data_test2[i, ])
+  }
+  Obj_coeff = Demand_pred*P
+  Cons_coeff = matrix(c(1,1,0,0,0,0,
+                        0,0,1,1,0,0,
+                        0,0,0,0,1,1,
+                        P[1], P[2],P[3],P[4],P[5],P[6]), nrow = 4, byrow = TRUE)
+  Dir = c("==",
+          "==",
+          "==",
+          "==")
+  Rhs = c(1,
+          1,
+          1,
+          possible_k[n])
+  Model = lp("max", Obj_coeff, Cons_coeff, Dir, Rhs, all.bin = TRUE)
+  Objectives[n] = Model$objval
+  Solutions[n,] = Model$solution
+}
+Demand_pred
+Solutions
+Objectives
+Solutions[match(max(Objectives), Objectives), ]
+
+```
+As our prices vector was, P = c(30, 35, 25, 30, 25, 30),
+from above results we can say that with these constraints cases also our optimal prices solution remains same as it was received without such constraints in part 1.2, i.e. optimal prices for product A, B and C would be 30, 30, and 30 respectively.
+
+
